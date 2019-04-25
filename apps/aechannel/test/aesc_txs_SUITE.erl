@@ -211,6 +211,9 @@
 -include("../../aecontract/include/hard_forks.hrl").
 
 -define(MINER_PUBKEY, <<12345:?MINER_PUB_BYTES/unit:8>>).
+-define(TIMESTAMP, 1234).
+-define(BENEFICIARY_PUBKEY_INT, 54321).
+-define(BENEFICIARY_PUBKEY, <<?BENEFICIARY_PUBKEY_INT:?MINER_PUB_BYTES/unit:8>>).
 -define(BOGUS_CHANNEL, <<1:?MINER_PUB_BYTES/unit:8>>).
 -define(ROLES, [initiator, responder]).
 -define(TEST_LOG(Format, Data), ct:log(Format, Data)).
@@ -395,6 +398,8 @@ groups() ->
      {force_progress_pinned_env, [sequence],
       [ fp_use_onchain_contract,
         fp_use_onchain_oracle,
+        fp_use_onchain_name_resolution,
+        fp_use_onchain_enviroment,
 
         fp_register_name,
         fp_register_oracle,
@@ -434,6 +439,7 @@ init_per_group(FPGroup, Config) when FPGroup =:= fork_awareness;
                    (V) when V < ?FORTUNA_FORK_HEIGHT -> ?MINERVA_PROTOCOL_VSN;
                    (_)                               -> ?FORTUNA_PROTOCOL_VSN
                 end),
+    meck:new(aec_chain, [passthrough]),
     Config;
 init_per_group(force_progress_pinned_env, Config) ->
     meck:expect(aec_hard_forks, protocol_effective_at_height,
@@ -454,10 +460,10 @@ init_per_group(force_progress_pinned_env, Config) ->
                 fun(BHash) when BHash =:= KBlockHash ->
                     {ok, fake_header(key, PrevKBlockHash,
                                       PrevKBlockHash,
-                                      Height - 5)};
+                                      Height)};
                     (BHash) when BHash =:= MBlockHash ->
                     {ok, fake_header(micro, KBlockHash, KBlockHash,
-                                      Height - 5)}
+                                      Height)}
                 end),
     MeckGetTrees =
         fun(Hash, Trees) ->
@@ -2739,8 +2745,8 @@ fp_use_onchain_name_resolution(Cfg) ->
 
 fp_use_onchain_enviroment(Cfg) ->
     FPRound = 20,
-    LockPeriod = 10,
-    FPHeight0 = 20,
+    LockPeriod = 2,
+    Height =  proplists:get_value(height, Cfg, 4),
     ForceCall =
         fun(Forcer, Fun, RType, R) ->
             fun(Props) ->
@@ -2755,11 +2761,29 @@ fp_use_onchain_enviroment(Cfg) ->
     BeneficiaryInt = 42,
     Beneficiary = <<BeneficiaryInt:?BENEFICIARY_PUB_BYTES/unit:8>>,
 
-    Height2 = Height1 + LockPeriod + 1,
-    Height3 = Height2 + LockPeriod + 1,
-    Height4 = Height3 + LockPeriod + 1,
+    Height2 = Height1 + 1,
+    Height3 = Height2 + 1,
+    Height4 = Height3 + 1,
+    MeckGetTrees = proplists:get_value(meck_chain_get_trees, Cfg),
+
+    ExpectedBenef =
+        fun(no_pinned_block) -> BeneficiaryInt;
+           ({_, _}) -> ?BENEFICIARY_PUBKEY_INT
+        end,
+    ExpectedHeight =
+        fun(no_pinned_block, CurrentHeight) -> CurrentHeight;
+           ({_, _}, _) -> Height % pinned one
+        end,
+    ExpectedTimestamp =
+        fun(no_pinned_block) -> Timestamp1;
+           ({_, Type}) ->
+              case Type of
+                  key -> ?TIMESTAMP + aec_block_micro_candidate:min_t_after_keyblock();
+                  micro -> ?TIMESTAMP
+              end
+        end,
     CallOnChain =
-        fun(Owner, Forcer) ->
+        fun(Owner, Forcer, PinnedBlock) ->
             IAmt0 = 30,
             RAmt0 = 30,
             ContractCreateRound = 10,
@@ -2768,7 +2792,7 @@ fp_use_onchain_enviroment(Cfg) ->
                   lock_period => LockPeriod,
                   channel_reserve => 1},
                [positive(fun create_channel_/2),
-                set_prop(height, FPHeight0),
+                set_prop(height, Height),
 
                 % create off-chain contract
                 create_trees_if_not_present(),
@@ -2781,18 +2805,35 @@ fp_use_onchain_enviroment(Cfg) ->
                 fun(#{height := H} = Props) ->
                     (assert_last_channel_result(H, word))(Props)
                 end,
+                %% pinned env is not overwritten with changed tx env
+                fun(P) ->
+                    case PinnedBlock of
+                        no_pinned_block -> P;
+                        {BH, BType} ->
+                        run(P,
+                            [ set_prop(pinned_block,
+                                        aesc_pinned_block:block_hash(BH,
+                                                                    BType)),
+                              fun(#{state := S} = P1) ->
+                                  Trees = aesc_test_utils:trees(S),
+                                  MeckGetTrees(BH, Trees),
+                                  P1
+                              end
+                            ])
+                    end
+                end,
                 set_tx_env(Height1, Timestamp1, Beneficiary),
-                ForceCall(Forcer, <<"coinbase">>, word, BeneficiaryInt),
+                ForceCall(Forcer, <<"coinbase">>, word, ExpectedBenef(PinnedBlock)),
                 set_tx_env(Height2, Timestamp1, Beneficiary),
-                ForceCall(Forcer, <<"block_height">>, word, Height2),
+                ForceCall(Forcer, <<"block_height">>, word, ExpectedHeight(PinnedBlock, Height2)),
                 set_tx_env(Height3, Timestamp1, Beneficiary),
-                ForceCall(Forcer, <<"coinbase">>, word, BeneficiaryInt),
-                set_tx_env(Height4, Timestamp1, Beneficiary),
-                ForceCall(Forcer, <<"timestamp">>, word, Timestamp1)
+                ForceCall(Forcer, <<"timestamp">>, word, ExpectedTimestamp(PinnedBlock))
                ])
         end,
-    [CallOnChain(Owner, Forcer) || Owner  <- ?ROLES,
-                                   Forcer <- ?ROLES],
+    PinnedBlocks = proplists:get_value(pinned_blocks, Cfg, [no_pinned_block]),
+    [CallOnChain(Owner, Forcer, PB) || Owner  <- ?ROLES,
+                                       Forcer <- ?ROLES,
+                                       PB     <- PinnedBlocks],
     ok.
 
 fp_use_remote_call(Cfg) ->
@@ -4620,10 +4661,19 @@ create_contract_call_payload_with_calldata(Key, ContractId, CallData, Amount) ->
         {UpdatedTrees, StateHash} =
             case maps:get(fake_solo_state_hash, Props, none) of
                 none ->
+                    {PinnedTrees, PinnedEnv} =
+                        case maps:get(pinned_block, Props, no_pinned_block) of
+                            no_pinned_block -> {OnChainTrees, Env};
+                            PinnedBlock ->
+                                {_, BH} = aesc_pinned_block:hash(PinnedBlock),
+                                {PE, PT} =
+                                    aetx_env:tx_env_and_trees_from_hash(aetx_transaction, BH),
+                                {PT, PE}
+                        end,
                     Trees1 = aesc_offchain_update:apply_on_trees(Update,
                                                                 aect_call_state_tree:prune_without_backend(Trees0),
-                                                                OnChainTrees,
-                                                                Env,
+                                                                PinnedTrees,
+                                                                PinnedEnv,
                                                                 Round,
                                                                 Reserve),
                     StateHash1 = aec_trees:hash(Trees1),
@@ -5815,22 +5865,22 @@ fake_header(Type, PrevHash, PrevKey, Height) ->
     case Type of
         key ->
             aec_headers:new_key_header(Height,
-                                       PrevHash,  % prev hash
-                                       PrevKey,   % prev key hash
-                                       BogusHash, % root hash
-                                       BogusHash, % miner
-                                       BogusHash, % beneficiary
-                                       16#1b0404cb, % target
-                                       no_value,  % pow
-                                       1234,      % nonce
-                                       1234,      % time
+                                       PrevHash,              % prev hash
+                                       PrevKey,               % prev key hash
+                                       BogusHash,             % root hash
+                                       ?MINER_PUBKEY,         % miner
+                                       ?BENEFICIARY_PUBKEY,   % beneficiary
+                                       16#1b0404cb,           % target
+                                       no_value,              % pow
+                                       1234,                  % nonce
+                                       ?TIMESTAMP,            % time
                                        aec_hard_forks:protocol_effective_at_height(0)); %vsn
         micro ->
             aec_headers:new_micro_header(Height,
                                          PrevHash,  %prev hash
                                          PrevKey,   % prev key hash
                                          BogusHash, % root hash
-                                         1234,      % time
+                                         ?TIMESTAMP,% time
                                          BogusHash, % tx hash
                                          <<>>,      % pof hash
                                          aec_hard_forks:protocol_effective_at_height(0)) %vsn

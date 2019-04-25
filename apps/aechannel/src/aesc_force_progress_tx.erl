@@ -214,7 +214,7 @@ check(#channel_force_progress_tx{payload       = Payload,
         {Type, BlockHash} ->
             TopHeight = aetx_env:height(Env),
             case aec_chain:get_header(BlockHash) of
-                {ok, Header} ->
+                {ok_1, Header} ->
                     PinnedEnvChecks =
                         [fun() ->
                              check_pinned_height(aec_headers:height(Header),
