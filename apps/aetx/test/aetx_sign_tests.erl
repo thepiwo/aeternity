@@ -49,7 +49,7 @@ sign_txs_test_() ->
        fun() ->
                BrokenKey = <<0:32/unit:8>>,
                {ok, SpendTx} = make_spend_tx(BrokenKey),
-               ?_assertException(error, {invalid_priv_key, [BrokenKey]},
+               ?assertException(error, {invalid_priv_key, [<<0:42/unit:8>>]},
                                  aec_test_utils:sign_tx(SpendTx, <<0:42/unit:8>>)),
                ok
       end},
