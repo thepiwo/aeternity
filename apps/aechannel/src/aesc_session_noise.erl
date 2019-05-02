@@ -85,8 +85,9 @@ close(Session) ->
 %% Connection establishment
 
 connect(Host, Port, Opts) ->
+    {Timeout, Retries} = get_reconnect_params(),
     gen_server:start_link(
-      ?MODULE, {self(), {connect, Host, Port, Opts}}, ?GEN_SERVER_OPTS).
+      ?MODULE, {self(), {connect, Retries, Host, Port, Opts, Timeout}}, ?GEN_SERVER_OPTS).
 
 accept(Port, Opts) ->
     gen_server:start_link(
@@ -101,58 +102,27 @@ init({Parent, Op}) ->
     %% process_flag(trap_exit, true),
     proc_lib:init_ack(Parent, {ok, self()}),
     ParentMonRef = monitor(process, Parent),
-    St = establish(Op, #st{parent = Parent,
-                           parent_mon_ref = ParentMonRef}),
+    St = #st{parent = Parent,
+             parent_mon_ref = ParentMonRef},
+    self() ! Op,
     gen_server:enter_loop(?MODULE, ?GEN_SERVER_OPTS, St).
-
-establish({accept, Port, Opts}, St) ->
-    TcpOpts = tcp_opts(listen, Opts),
-    lager:debug("listen: TcpOpts = ~p", [TcpOpts]),
-    {ok, LSock} = gen_tcp:listen(Port, TcpOpts),
-    {ok, TcpSock} = gen_tcp:accept(LSock),
-    %% TODO: extract/check something from FinalState?
-    EnoiseOpts = enoise_opts(accept, Opts),
-    lager:debug("EnoiseOpts (accept) = ~p", [EnoiseOpts]),
-    {ok, EConn, _FinalSt} = enoise:accept(TcpSock, EnoiseOpts),
-    %% tell_fsm({accept, EConn}, St),
-    St#st{econn = EConn};
-establish({connect, Host, Port, Opts}, St) ->
-    TcpOpts = tcp_opts(connect, Opts),
-    lager:debug("connect: TcpOpts = ~p", [TcpOpts]),
-    {ok, TcpSock} = connect_tcp(Host, Port, TcpOpts),
-    %% TODO: extract/check something from FinalState?
-    EnoiseOpts = enoise_opts(connect, Opts),
-    lager:debug("EnoiseOpts (connect) = ~p", [EnoiseOpts]),
-    {ok, EConn, _FinalSt} = enoise:connect(TcpSock, EnoiseOpts),
-    %% tell_fsm({accept, EConn}, St),
-    St#st{econn = EConn}.
-
-connect_tcp(Host, Port, Opts) ->
-    {Timeout, Retries} = get_reconnect_params(),
-    connect_tcp(Retries, Host, Port, Opts, Timeout).
-
-connect_tcp(0, _, _, _, _) ->
-    erlang:error(connect_timeout);
-connect_tcp(Retries, Host, Port, Opts, Timeout) when Retries > 0 ->
-    case gen_tcp:connect(Host, Port, Opts, Timeout) of
-        {ok, _TcpSock} = Ok ->
-            Ok;
-        {error, _} ->
-            timer:sleep(1000),
-            connect_tcp(Retries-1, Host, Port, Opts, Timeout)
-    end.
 
 get_reconnect_params() ->
     %% {ConnectTimeout, Retries}
     {10000, 30}.
 
 
+handle_call(_, _From, #st{econn = undefined} = St) ->
+    Err = not_initialized_yet_call,
+    {stop, Err, {error, Err}, St};
 handle_call(close, _From, #st{econn = EConn} = St) ->
     close_econn(EConn),
     {stop, normal, ok, St};
 handle_call(_Req, _From, St) ->
     {reply, {error, unknown_call}, St}.
 
+handle_cast(_, #st{econn = undefined} = St) ->
+    {stop, not_initialized_yet_cast, St}; 
 handle_cast(Msg, St) ->
     try handle_cast_(Msg, St)
     catch
@@ -168,6 +138,41 @@ handle_cast_({msg, M, Info}, #st{econn = EConn} = St) ->
 handle_cast_(_Msg, St) ->
     {noreply, St}.
 
+handle_info({accept, Port, Opts}, #st{econn = undefined} = St) ->
+    TcpOpts = tcp_opts(listen, Opts),
+    lager:debug("listen: TcpOpts = ~p", [TcpOpts]),
+    {ok, LSock} = gen_tcp:listen(Port, TcpOpts),
+    {ok, TcpSock} = gen_tcp:accept(LSock),
+    %% TODO: extract/check something from FinalState?
+    EnoiseOpts = enoise_opts(accept, Opts),
+    lager:debug("EnoiseOpts (accept) = ~p", [EnoiseOpts]),
+    {ok, EConn, _FinalSt} = enoise:accept(TcpSock, EnoiseOpts),
+    St1 = St#st{econn = EConn},
+    inform_fsm_connection_success(St1),
+    {noreply, St1};
+handle_info({connect, Retries, _Host, _Port, _Opts, _Timeout}, #st{econn = undefined} = St)
+    when Retries =:= 0 ->
+    inform_fsm_connection_failed(St),
+    {stop, not_initialized_yet, St}; 
+handle_info({connect, Retries, Host, Port, Opts, Timeout}, #st{econn = undefined} = St) ->
+    TcpOpts = tcp_opts(connect, Opts),
+    lager:debug("connect: TcpOpts = ~p", [TcpOpts]),
+    case gen_tcp:connect(Host, Port, TcpOpts, Timeout) of
+        {ok, TcpSock} ->
+            %% TODO: extract/check something from FinalState?
+            EnoiseOpts = enoise_opts(connect, Opts),
+            lager:debug("EnoiseOpts (connect) = ~p", [EnoiseOpts]),
+            {ok, EConn, _FinalSt} = enoise:connect(TcpSock, EnoiseOpts),
+            St1 = St#st{econn = EConn},
+            inform_fsm_connection_success(St1),
+            {noreply, St1};
+        {error, _} ->
+            timer:send_after(1000, {connect, Retries - 1, Host, Port, Opts,
+                                    Timeout}),
+            {noreply, St}
+    end;
+handle_info(_, #st{econn = undefined} = St) ->
+    {stop, not_initialized_yet_info, St}; 
 %% FSM had died
 handle_info({'DOWN', Ref, process, Pid, _Reason},
             #st{parent_mon_ref=Ref, parent=Pid, econn=EConn}=St) ->
@@ -220,6 +225,13 @@ call(P, Msg) ->
 
 tell_fsm({_, _} = Msg, #st{parent = Parent}) ->
     aesc_fsm:message(Parent, Msg).
+
+inform_fsm_connection_success(#st{parent = Parent}) ->
+    Parent ! {self(), established}.
+
+inform_fsm_connection_failed(#st{parent = Parent}) ->
+    Parent ! {self(), connection_timeout}.
+
 
 tcp_opts(_Op, Opts) ->
     case lists:keyfind(tcp, 1, Opts) of

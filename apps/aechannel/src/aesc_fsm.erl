@@ -482,32 +482,39 @@ init(#{opts := Opts0} = Arg) ->
               fun check_rpt_opt/1,
               fun check_log_opt/1
              ], Opts0),
-    Session = start_session(Arg, Opts),
-    {ok, State} = aesc_offchain_state:new(Opts),
-    Data = #data{role    = Role,
-                client  = Client,
-                session = Session,
-                opts    = Opts,
-                state   = State,
-                log     = #w{keep = maps:get(log_keep, Opts)}},
-    lager:debug("Session started, Data = ~p", [Data]),
-    %% TODO: Amend the fsm above to include this step. We have transport-level
-    %% connectivity, but not yet agreement on the channel parameters. We will next send
-    %% a channel_open() message and await a channel_accept().
-    Reestablish = maps:is_key(existing_channel_id, Opts),
-    case Role of
-        initiator ->
-            if Reestablish ->
-                    ok_next(reestablish_init, send_reestablish_msg(Data));
-              true ->
-                    ok_next(initialized, send_open_msg(Data))
+    case start_session(Arg, Opts) of
+        {ok, Session} ->
+            {ok, State} = aesc_offchain_state:new(Opts),
+            Data = #data{role   = Role,
+                        client  = Client,
+                        session = Session,
+                        opts    = Opts,
+                        state   = State,
+                        log     = #w{keep = maps:get(log_keep, Opts)}},
+            lager:debug("Session started, Data = ~p", [Data]),
+            %% TODO: Amend the fsm above to include this step. We have transport-level
+            %% connectivity, but not yet agreement on the channel parameters. We will next send
+            %% a channel_open() message and await a channel_accept().
+            Reestablish = maps:is_key(existing_channel_id, Opts),
+            case Role of
+                initiator ->
+                    if Reestablish ->
+                            ok_next(reestablish_init, send_reestablish_msg(Data));
+                      true ->
+                            ok_next(initialized, send_open_msg(Data))
+                    end;
+                responder ->
+                    if Reestablish ->
+                            ok_next(awaiting_reestablish, Data);
+                      true ->
+                            ok_next(awaiting_open, Data)
+                    end
             end;
-        responder ->
-            if Reestablish ->
-                    ok_next(awaiting_reestablish, Data);
-              true ->
-                    ok_next(awaiting_open, Data)
-            end
+        {error, _} ->
+            report(info, {died, timeout}, #data{role   = Role,
+                                                client = Client,
+                                                opts   = Opts}),
+            {stop, normal}
     end.
 
 ok_next(Next, Data) ->
@@ -573,12 +580,24 @@ check_log_opt(Opts) ->
 %% providing the service, and the initiator connects.
 start_session(#{port := Port}, #{role := responder} = Opts) ->
     NoiseOpts = maps:get(noise, Opts, []),
-    ok(aesc_session_noise:accept(Port, NoiseOpts));
+    Session = ok(aesc_session_noise:accept(Port, NoiseOpts)),
+    wait_connection(Session);
+
 start_session(#{host := Host, port := Port}, #{role := initiator} = Opts) ->
     NoiseOpts = maps:get(noise, Opts, []),
-    ok(aesc_session_noise:connect(Host, Port, NoiseOpts)).
+    Session = ok(aesc_session_noise:connect(Host, Port, NoiseOpts)),
+    wait_connection(Session).
 
 ok({ok, X}) -> X.
+
+wait_connection(Session) ->
+    Err = {error, connect_timeout},
+    receive
+        {Session, established} -> {ok, Session};
+        {Session, connection_timeout} -> Err
+    after
+        3000 -> Err
+    end.
 
 
 %% ======================================================================
