@@ -958,22 +958,34 @@ time_summary_N_blocks() ->
 %%%===================================================================
 %%% Fees test
 
-fees_test_() ->
-    {foreach,
-     fun() ->
-             aec_test_utils:start_chain_db(),
-             setup_meck_and_keys()
-     end,
-     fun(TmpDir) ->
-             aec_test_utils:stop_chain_db(),
-             teardown_meck_and_keys(TmpDir)
-     end,
-     [{"Check fee division between three beneficiaries",
-       fun fees_three_beneficiaries/0},
-      {"Check reward is delayed",
-       fun fees_delayed_reward/0}
-     ]
-    }.
+fees_test_setup(Enabled, Activated, BeneficiaryShare) ->
+    #{public := PubKeyProtocol} = enacl:sign_keypair(),
+    application:set_env(aecore, dev_reward_enabled, Enabled),
+    application:set_env(aecore, dev_reward_activated, Activated),
+    application:set_env(aecore, dev_reward_allocated_shares, BeneficiaryShare),
+    application:set_env(aecore, dev_reward_beneficiaries, [{PubKeyProtocol, 100}]),
+    aec_test_utils:start_chain_db(),
+    setup_meck_and_keys().
+
+fees_test_teardown(TmpDir) ->
+    aec_test_utils:stop_chain_db(),
+    teardown_meck_and_keys(TmpDir).
+
+
+%%% Check fee division between three beneficiaries with reward split
+fees_three_beneficiaries_with_split_test_() ->
+    {setup,
+     fun() -> fees_test_setup(true, true, 100) end,
+     fun fees_test_teardown/1,
+     fun fees_three_beneficiaries/0}.
+
+%%% Check fee division between three beneficiaries without reward split
+fees_three_beneficiaries_without_split_test_() ->
+    {setup,
+     fun() -> fees_test_setup(false, true, 100) end,
+     fun fees_test_teardown/1,
+     fun fees_three_beneficiaries/0}.
+
 
 fees_three_beneficiaries() ->
     meck:expect(aec_governance, beneficiary_reward_delay, 0, 3),
@@ -1036,26 +1048,53 @@ fees_three_beneficiaries() ->
 
     %% Before the last generation is closed, only the two first beneficiaries
     %% should have collected rewards
-    ?assertEqual(aec_governance:block_mine_reward(1) + reward_40(Fee1 + Fee2),
+    ?assertEqual(split_reward(aec_governance:block_mine_reward(1) + reward_40(Fee1 + Fee2)),
                  orddict:fetch(PubKey6, DictBal1)),
-    ?assertEqual(aec_governance:block_mine_reward(2) + reward_60(Fee1 + Fee2),
+    ?assertEqual(split_reward(aec_governance:block_mine_reward(2) + reward_60(Fee1 + Fee2)),
                  orddict:fetch(PubKey7, DictBal1)),
     ?assertEqual(false, orddict:is_key(PubKey5, DictBal1)),
 
     %% When the last generation is closed, the last transaction fee should
     %% also have been collected.
-    ?assertEqual(aec_governance:block_mine_reward(1) + reward_40(Fee1 + Fee2),
+    ?assertEqual(split_reward(aec_governance:block_mine_reward(1) + reward_40(Fee1 + Fee2)),
                  orddict:fetch(PubKey6, DictBal2)),
-    ?assertEqual(aec_governance:block_mine_reward(2) + reward_60(Fee1 + Fee2) + reward_40(Fee3),
+    ?assertEqual(split_reward(aec_governance:block_mine_reward(2) + reward_60(Fee1 + Fee2)) + split_reward(reward_40(Fee3)),
                  orddict:fetch(PubKey7, DictBal2)),
-    ?assertEqual(aec_governance:block_mine_reward(3) + reward_60(Fee3),
+    ?assertEqual(split_reward(aec_governance:block_mine_reward(3) + reward_60(Fee3)),
                  orddict:fetch(PubKey8, DictBal2)),
+
+    [{PubKeyProtocol, _}] = aec_dev_reward:beneficiaries(),
+    case aec_dev_reward:enabled() of
+        true ->
+            TotalRewards = aec_governance:block_mine_reward(1) + aec_governance:block_mine_reward(2) + aec_governance:block_mine_reward(3)
+                + Fee1 + Fee2 + Fee3,
+            ProtocolBenefits = TotalRewards - split_reward(TotalRewards),
+            ?assertEqual(ProtocolBenefits, orddict:fetch(PubKeyProtocol, DictBal2));
+        false ->
+            ?assertEqual(false, orddict:is_key(PubKeyProtocol, DictBal2))
+    end,
 
     %% Miners' balances did not change, since beneficiaries took the rewards.
     ?assertEqual(error, orddict:find(PubKey3, DictBal2)),
     ?assertEqual(error, orddict:find(PubKey4, DictBal2)),
     ?assertEqual(error, orddict:find(PubKey5, DictBal2)),
     ok.
+
+
+%%% Check reward is delayed with reward split
+fees_delayed_reward_with_split_test_() ->
+    {setup,
+     fun() -> fees_test_setup(true, true, 100) end,
+     fun fees_test_teardown/1,
+     fun fees_delayed_reward/0}.
+
+%%% Check reward is delayed without reward split
+fees_delayed_reward_without_split_test_() ->
+    {setup,
+     fun() -> fees_test_setup(false, true, 100) end,
+     fun fees_test_teardown/1,
+     fun fees_delayed_reward/0}.
+
 
 fees_delayed_reward() ->
     %% Delay reward by 2 key blocks / generations.
@@ -1098,7 +1137,7 @@ fees_delayed_reward() ->
     DictBal1 = orddict:from_list(Balances1),
 
     %% Check only beneficiary of K1 gets rewards, without any rewards / fees of the next generations
-    ?assertEqual({ok, MiningReward1}, orddict:find(PubKey3, DictBal1)),
+    ?assertEqual({ok, split_reward(MiningReward1)}, orddict:find(PubKey3, DictBal1)),
 
     %% Insert KB4
     ok = write_blocks_to_chain([KB4]),
@@ -1107,7 +1146,7 @@ fees_delayed_reward() ->
     DictBal2 = orddict:from_list(Balances2),
 
     %% Check rewards are granted for the first two key blocks, with fees of first generation
-    ?assertEqual({ok, MiningReward1 + MiningReward2 + Fee1},
+    ?assertEqual({ok, split_reward(MiningReward1 + MiningReward2 + Fee1)},
                  orddict:find(PubKey3, DictBal2)),
 
     %% Insert the rest of the chain
@@ -1117,9 +1156,10 @@ fees_delayed_reward() ->
     DictBal3 = orddict:from_list(Balances3),
 
     %% Check rewards are granted for the first three key blocks, with fees of first two generations
-    ?assertEqual({ok, MiningReward1 + MiningReward2 + MiningReward3 + Fee1 + Fee2},
+    ?assertEqual({ok, split_reward(MiningReward1 + MiningReward2 + MiningReward3 + Fee1 + Fee2)},
                  orddict:find(PubKey3, DictBal3)),
     ok.
+
 
 %%%===================================================================
 %%% PoF test
@@ -1633,13 +1673,13 @@ token_supply_ga() ->
 
 setup_meck_and_keys() ->
     aec_test_utils:mock_difficulty_as_target(),
-    aec_test_utils:mock_block_target_validation(),
+    aec_test_utils:mock_governance(),
     aec_test_utils:mock_genesis_and_forks(),
     aec_test_utils:aec_keys_setup().
 
 teardown_meck_and_keys(TmpDir) ->
     aec_test_utils:unmock_difficulty_as_target(),
-    aec_test_utils:unmock_block_target_validation(),
+    aec_test_utils:unmock_governance(),
     aec_test_utils:unmock_genesis_and_forks(),
     aec_test_utils:aec_keys_cleanup(TmpDir).
 
@@ -1839,6 +1879,15 @@ get_used_gas_fee(STx) ->
             CPubkey = CB:contract_pubkey(RawTx),
             {ok, Call}  = aec_chain:get_contract_call(CPubkey, CallId, Hash),
             aect_call:gas_used(Call) * aect_call:gas_price(Call)
+    end.
+
+split_reward(Fee) ->
+    case aec_dev_reward:enabled() of
+        true ->
+            ContribFactor = aec_dev_reward:allocated_shares(),
+            Fee * (1000 - ContribFactor) div 1000;
+        false ->
+            Fee
     end.
 
 %%%===================================================================

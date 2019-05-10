@@ -14,8 +14,8 @@
         , unmock_time/0
         , mock_difficulty_as_target/0
         , unmock_difficulty_as_target/0
-        , mock_block_target_validation/0
-        , unmock_block_target_validation/0
+        , mock_governance/0
+        , unmock_governance/0
         , mock_fast_cuckoo_pow/0
         , mock_fast_and_deterministic_cuckoo_pow/0
         , mock_prebuilt_cuckoo_pow/1
@@ -244,16 +244,15 @@ unmock_difficulty_as_target() ->
     meck:unload(aec_blocks).
 
 
-mock_block_target_validation() ->
+mock_governance() ->
     meck:new(aec_governance, [passthrough]),
     meck:new(aec_target, [passthrough]),
     meck:expect(aec_governance, key_blocks_to_check_difficulty_count, 0, 1),
     meck:expect(aec_target, verify, 2, ok).
 
-unmock_block_target_validation() ->
+unmock_governance() ->
     meck:unload(aec_governance),
     meck:unload(aec_target).
-
 
 start_chain_db() ->
     ok = mnesia:start(),
@@ -302,11 +301,34 @@ grant_fees(FromHeight, Chain, TreesIn, BeneficiaryAccount) ->
     Beneficiary1Reward = round(0.4 * Fees),
     BlockReward = aec_governance:block_mine_reward(FromHeight + 1),
     Beneficiary2Reward = Fees - Beneficiary1Reward + BlockReward,
-    Trees1 = aec_trees:grant_fee(Beneficiary2, TreesIn, Beneficiary2Reward),
-    case FromHeight =:= 0 of
-        true  -> Trees1;
-        false -> aec_trees:grant_fee(Beneficiary1, Trees1, Beneficiary1Reward)
-    end.
+    {{Benefits1, Benefits2}, BenefitsProto} =
+        case aec_dev_reward:enabled() andalso aec_dev_reward:activated(FromHeight) of
+            true ->
+                AllocShares = 100,
+                TotalShares = 1000,
+                AbsContrib1 = Beneficiary1Reward * AllocShares div TotalShares,
+                AbsContrib2 = Beneficiary2Reward * AllocShares div TotalShares,
+                DevContrib  = AbsContrib1 + AbsContrib2,
+                {{Beneficiary1Reward - AbsContrib1, Beneficiary2Reward - AbsContrib2}, DevContrib};
+            false ->
+                {{Beneficiary1Reward, Beneficiary2Reward}, 0}
+        end,
+    [{DevRewardPK, _} | _] = aec_dev_reward:beneficiaries(),
+    grant_fees_iter({Benefits1, Beneficiary1}, {Benefits2, Beneficiary2},
+                    {BenefitsProto, DevRewardPK}, FromHeight, TreesIn).
+
+grant_fees_iter(_, {Benefits2, Beneficiary2}, {0,_}, 0, TreesIn) ->
+    aec_trees:grant_fee(Beneficiary2, TreesIn, Benefits2);
+grant_fees_iter(_, {Benefits2, Beneficiary2}, {BenefitsProto, BeneficiaryProto}, 0, TreesIn) ->
+    Trees1 = aec_trees:grant_fee(Beneficiary2, TreesIn, Benefits2),
+    aec_trees:grant_fee(BeneficiaryProto, Trees1, BenefitsProto);
+grant_fees_iter({Benefits1, Beneficiary1}, {Benefits2, Beneficiary2}, {0,_BeneficiaryProto}, _, TreesIn) ->
+    Trees1 = aec_trees:grant_fee(Beneficiary2, TreesIn, Benefits2),
+    aec_trees:grant_fee(Beneficiary1, Trees1, Benefits1);
+grant_fees_iter({Benefits1, Beneficiary1}, {Benefits2, Beneficiary2}, {BenefitsProto,BeneficiaryProto}, _, TreesIn) ->
+    Trees1 = aec_trees:grant_fee(Beneficiary2, TreesIn, Benefits2),
+    Trees2 = aec_trees:grant_fee(BeneficiaryProto, Trees1, BenefitsProto),
+    aec_trees:grant_fee(Beneficiary1, Trees2, Benefits1).
 
 fees_at_height(N, [{B, S} | Chain], Acc, Beneficiary) ->
     Height = aec_blocks:height(B),
