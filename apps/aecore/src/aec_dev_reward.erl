@@ -12,7 +12,7 @@
 -include_lib("aecontract/include/hard_forks.hrl").
 
 
--define(ENABLED, false).
+-define(ENABLED, true).
 -define(TOTAL_SHARES, 1000). % 100 shares == 10% of the reward
 %%% for: "ak_2A3PZPfMC2X7ZVy4qGXz2xh2Lbh79Q4UvZ5fdH7QVFocEgcKzU:100" TODO - use actual pubkey for mainnet account
 -define(BENEFICIARIES, [{<<152,57,168,5,218,153,177,254,226,207,243,133,11,50,143,68,121,242,94,41,187,198,158,67,133,88,6,71,55,26,85,54>>, 100}]).
