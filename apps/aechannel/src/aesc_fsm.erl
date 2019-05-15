@@ -497,7 +497,7 @@ connection_died(Fsm) ->
     %TODO: possibility for reconnect
     lager:debug("connection to participant died(~p)", [Fsm]),
     gen_statem:cast(Fsm, ?DISCONNECT).
-    
+
 
 stop_ok(ok) ->
     ok;
@@ -885,7 +885,7 @@ awaiting_signature(cast, {?SIGNED, settle_tx, SignedTx} = Msg,
                             latest = undefined},
                 settle_signed(SignedTx, Updates, D1)
         end, D);
-                                                        
+
 %% Other
 awaiting_signature(Type, Msg, D) ->
     handle_common_event(Type, Msg, postpone, D).
@@ -1069,7 +1069,7 @@ settle_signed(SignedTx, Updates, #data{ on_chain_id = ChId} = D) ->
     end.
 
 is_channel_locked(0) -> false;
-is_channel_locked(LockedUntil) -> 
+is_channel_locked(LockedUntil) ->
     LockedUntil >= cur_height().
 
 awaiting_locked(enter, _OldSt, _D) -> keep_state_and_data;
@@ -1344,10 +1344,6 @@ channel_closing(cast, {?CHANNEL_UNLOCKED, #{chan_id := ChId}} = Msg,
             ok
     end,
     keep_state(D1);
-%% channel_closing(cast, {?MIN_DEPTH_ACHIEVED, _ChanId, close, undefined},
-%%                 #data{latest = {min_depth, close, undefined, _}} = D) ->
-%%     report(info, closed, D),
-%%     close(closed, D);
 channel_closing(Type, Msg, D) ->
     handle_common_event(Type, Msg, discard, D).
 
@@ -1367,7 +1363,6 @@ channel_closed(Type, Msg, D) ->
     handle_common_event(Type, Msg, discard, D).
 
 disconnected(cast, {?CH_REESTABL, _Msg}, D) ->
-    %% next_state(closing, D).  % TODO: this is surely wrong
     close({error, unexpected_sequence}, D).  % TODO: this is just a placeholder
 
 close(Reason, D) ->
@@ -2314,7 +2309,7 @@ check_funding_created_msg(#{ temporary_channel_id := ChanId
                            , block_hash           := ?DUMMY_BLOCK_HASH
                            , data                 := #{tx      := TxBin,
                                                        updates := UpdatesBin}} = Msg,
-                          #data{ state = State, opts = Opts, 
+                          #data{ state = State, opts = Opts,
                                  channel_id = ChanId } = Data) ->
     Updates = [aesc_offchain_update:deserialize(U) || U <- UpdatesBin],
     SignedTx = aetx_sign:deserialize_from_binary(TxBin),
@@ -2490,7 +2485,7 @@ send_withdraw_created_msg(SignedTx, Updates,
 
 check_withdraw_created_msg(#{ channel_id := ChanId
                             , block_hash := ?DUMMY_BLOCK_HASH
-                            , data       := #{tx      := TxBin, 
+                            , data       := #{tx      := TxBin,
                                               updates := UpdatesBin}} = Msg,
                   #data{ on_chain_id = ChanId } = Data) ->
     Updates = [aesc_offchain_update:deserialize(U) || U <- UpdatesBin],
@@ -2574,7 +2569,7 @@ check_update_msg(Type, Msg, D) ->
 
 check_update_msg_(Type, #{ channel_id := ChanId
                          , block_hash := ?DUMMY_BLOCK_HASH
-                         , data       := #{tx      := TxBin, 
+                         , data       := #{tx      := TxBin,
                                            updates := UpdatesBin}} = Msg,
                   #data{ on_chain_id = ChanId } = D) ->
     Updates = [aesc_offchain_update:deserialize(U) || U <- UpdatesBin],
@@ -3037,7 +3032,6 @@ default_report_flags() ->
      , debug        => false
      , on_chain_tx  => true}.
 
-
 report_on_chain_tx(Info, SignedTx, D) ->
     {Type,_} = aetx:specialize_type(aetx_sign:tx(SignedTx)),
     report(on_chain_tx, #{ tx => SignedTx
@@ -3204,7 +3198,7 @@ check_tx_and_verify_signatures(SignedTx, Updates, Type, Data, Pubkeys, ErrTypeMs
             end;
         _E ->
             {error, ErrTypeMsg}
-    end.    
+    end.
 
 maybe_check_sigs_create(Tx, Updates, Who, NextState,
                        #data{state = State, opts = Opts} = D) ->
